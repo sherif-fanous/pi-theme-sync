@@ -19,6 +19,10 @@ import {
   type DecMode2031Subscription,
   enableDecMode2031Subscription,
 } from "./detectors/terminal/dec-mode-2031.js";
+import {
+  type Osc11Subscription,
+  enableOsc11Subscription,
+} from "./detectors/terminal/osc-11.js";
 import type {
   Appearance,
   PollingDetector,
@@ -62,6 +66,7 @@ export function createThemeSyncRuntime(): ThemeSyncRuntime {
   let poller: ReturnType<typeof setInterval> | undefined;
   let driftPoller: ReturnType<typeof setInterval> | undefined;
   let decMode2031Subscription: DecMode2031Subscription | undefined;
+  let osc11Subscription: Osc11Subscription | undefined;
   let isShutDown = false;
 
   const applyMappedTheme = (
@@ -128,6 +133,9 @@ export function createThemeSyncRuntime(): ThemeSyncRuntime {
     decMode2031Subscription?.disableTerminalNotifications();
     decMode2031Subscription = undefined;
 
+    osc11Subscription?.removeListener();
+    osc11Subscription = undefined;
+
     isShutDown = true;
   };
 
@@ -187,6 +195,28 @@ export function createThemeSyncRuntime(): ThemeSyncRuntime {
       );
     }
 
+    // Always register an OSC 11 listener for unsolicited color updates.
+    // Many terminals send \x1b]11;rgb:... on theme change, and tmux forwards
+    // these SET sequences to the inner terminal (unlike DSR queries which it
+    // handles internally). This catches theme changes that polling and
+    // DEC mode 2031 subscriptions miss inside terminal multiplexers.
+    registerOsc11Listener(ctx);
+
+    // Exclude osc-11 from the polling loop: the subscription listener above
+    // already handles OSC 11 in real time. If polling also sent osc-11
+    // queries, the subscription listener (registered first in inputListeners)
+    // would consume the responses first, causing every polling query to time
+    // out. Polling now only covers the remaining detectors (dsr-996, system)
+    // as a fallback for environments where the terminal doesn't push
+    // unsolicited OSC 11 updates.
+    const pollingDetectorsForLoop = availablePollingDetectors.filter(
+      (detector) => detector !== "osc-11",
+    );
+
+    if (osc11Subscription && pollingDetectorsForLoop.length === 0) {
+      detectionStrategy = "OSC 11 (subscription)";
+    }
+
     for (const detector of availableSubscriptionDetectors) {
       if (detector === "dec-mode-2031") {
         const subscription = enableDecMode2031Subscription(
@@ -232,13 +262,13 @@ export function createThemeSyncRuntime(): ThemeSyncRuntime {
       }
     }
 
-    if (availablePollingDetectors.length > 0) {
+    if (pollingDetectorsForLoop.length > 0) {
       detectionStrategy = lastResolvedPollingDetector
         ? DETECTOR_LABELS[lastResolvedPollingDetector]
         : "Polling";
 
       poller = setInterval(() => {
-        void resolvePollingAppearance(ctx, availablePollingDetectors).then(
+        void resolvePollingAppearance(ctx, pollingDetectorsForLoop).then(
           (detectedAppearance: Appearance) => {
             if (isShutDown) {
               return;
@@ -260,7 +290,31 @@ export function createThemeSyncRuntime(): ThemeSyncRuntime {
       return;
     }
 
-    detectionStrategy = "No available detectors";
+    // Preserve detectionStrategy set above (e.g. "OSC 11 (subscription)")
+    // when the subscription listener is active. Only fall back to
+    // "No available detectors" when nothing is working.
+    if (!osc11Subscription && pollingDetectorsForLoop.length === 0) {
+      detectionStrategy = "No available detectors";
+    }
+  };
+
+  const registerOsc11Listener = (ctx: ExtensionContext) => {
+    const sub = enableOsc11Subscription(ctx, (detectedAppearance) => {
+      if (isShutDown) {
+        return;
+      }
+
+      if (detectedAppearance !== "unknown") {
+        currentAppearance = detectedAppearance;
+
+        markEvent(`Detected ${detectedAppearance} via OSC 11 update`);
+        applyMappedTheme(ctx, detectedAppearance);
+      }
+    });
+
+    if (sub) {
+      osc11Subscription = sub;
+    }
   };
 
   const getStatus = (ctx: ExtensionContext): RuntimeStatus => {

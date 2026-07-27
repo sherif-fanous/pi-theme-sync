@@ -21,7 +21,10 @@ import { probeDecMode2031Support } from "./terminal/dec-mode-2031.js";
 import { detectAppearanceViaDsr996 } from "./terminal/dsr-996.js";
 import { detectAppearanceViaOsc11Background } from "./terminal/osc-11.js";
 
-const POLLING_DETECTORS: PollingDetector[] = ["dsr-996", "osc-11", "system"];
+// OSC 11 first: DSR 996/997 responses are consumed by pi's TUI
+// (consumeTerminalColorSchemeReport) before extensions see them,
+// so the DSR detector always fails inside interactive mode.
+const POLLING_DETECTORS: PollingDetector[] = ["osc-11", "dsr-996", "system"];
 const SUBSCRIPTION_DETECTORS: SubscriptionDetector[] = ["dec-mode-2031"];
 
 export async function detectAppearance(
